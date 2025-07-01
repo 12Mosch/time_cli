@@ -1,16 +1,9 @@
-// Cargo.toml (additions)
-// ----------------------
-// anyhow      = "1"
-// clap        = { version = "4.5", features = ["derive"] }
-// indicatif   = "0.17"
-// owo-colors  = "4"
-// reqwest     = { version = "0.12", features = ["json", "rustls-tls"] }
-// textwrap    = "0.16"
-// tokio       = { version = "1",   features = ["macros", "rt-multi-thread"] }
-
-use anyhow::{ Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use clap::{Parser, Subcommand};
+use comfy_table::{
+    presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Row, Table,
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use reqwest::Client;
@@ -18,23 +11,38 @@ use serde::Deserialize;
 use std::time::Duration;
 use textwrap::{fill, termwidth};
 
-// ---------- helpers ---------------------------------------------------------
+/* --------------------------------------------------------------------------
+ *                                helpers
+ * ---------------------------------------------------------------------- */
 
-/// Validate an ISO-639-1 language code (two ASCII letters).
+/// Validate an ISO-639-1 language code (exactly two ASCII letters).
 fn parse_lang_code(s: &str) -> std::result::Result<String, String> {
     if s.len() == 2 && s.chars().all(|c| c.is_ascii_alphabetic()) {
         Ok(s.to_ascii_lowercase())
     } else {
         Err(format!(
-            "'{s}' is not a valid ISO-639-1 language code (two ASCII letters)"
+            "'{s}' is not a valid ISO-639-1 language code \
+             (two ASCII letters)",
         ))
     }
 }
 
-// ---------- CLI -------------------------------------------------------------
+/* --------------------------------------------------------------------------
+ *                                  CLI
+ * ---------------------------------------------------------------------- */
 
 #[derive(Parser, Debug)]
-#[command(name = "time-cli", author, version, about)]
+#[command(
+    name = "time-cli",
+    author,
+    version,
+    about = "Tiny CLI that prints the current time and \
+             Wikipedia “On This Day” events",
+    propagate_version = true,
+    color = clap::ColorChoice::Always,
+    arg_required_else_help = true,
+    after_long_help = "Project home: https://github.com/your/repo",
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -60,16 +68,36 @@ struct HistoryArgs {
         long,
         value_parser = parse_lang_code,
         value_name = "LANG",
-        default_value = "en"
+        default_value = "en",
     )]
     language: String,
 
     /// Suppress the spinner (useful for scripts)
     #[arg(long)]
     quiet: bool,
+
+    /// Override month (1-12). Defaults to the current month.
+    #[arg(
+        short = 'm',
+        long,
+        value_name = "MONTH",
+        value_parser = clap::value_parser!(u32).range(1..=12),
+    )]
+    month: Option<u32>,
+
+    /// Override day of month (1-31). Defaults to the current day.
+    #[arg(
+        short = 'd',
+        long,
+        value_name = "DAY",
+        value_parser = clap::value_parser!(u32).range(1..=31),
+    )]
+    day: Option<u32>,
 }
 
-// ---------- Models ----------------------------------------------------------
+/* --------------------------------------------------------------------------
+ *                                models
+ * ---------------------------------------------------------------------- */
 
 #[derive(Deserialize, Debug)]
 struct OnThisDayResponse {
@@ -82,7 +110,9 @@ struct Event {
     text: String,
 }
 
-// ---------- Main ------------------------------------------------------------
+/* --------------------------------------------------------------------------
+ *                                 main
+ * ---------------------------------------------------------------------- */
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -113,82 +143,122 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// ---------- History ---------------------------------------------------------
+/* --------------------------------------------------------------------------
+ *                              Wikipedia
+ * ---------------------------------------------------------------------- */
 
 async fn show_on_this_day(client: &Client, args: &HistoryArgs) -> Result<()> {
-    let now = Local::now();
-    let (month, day) = (now.month(), now.day());
+    // Determine the requested calendar day
+    let today = Local::now();
+    let month = args.month.unwrap_or(today.month());
+    let day = args.day.unwrap_or(today.day());
 
-    let pb = if args.quiet {
+    // Validate the month/day combination (use leap year for “Feb-29”)
+    if NaiveDate::from_ymd_opt(2024, month, day).is_none() {
+        bail!("'{month:02}-{day:02}' is not a valid calendar date");
+    }
+
+    // Optional spinner
+    let spinner = if args.quiet {
         None
     } else {
         let pb = ProgressBar::new_spinner();
         pb.enable_steady_tick(Duration::from_millis(120));
         pb.set_style(
-            ProgressStyle::with_template("{spinner:.blue} {msg}")?
-                .tick_strings(&[
-                    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-                ]),
+            ProgressStyle::with_template("{spinner:.blue} {msg}")?.tick_strings(
+                &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+            ),
         );
         pb.set_message(format!(
-            "Fetching events for {month:02}-{day:02} in '{lang}'...",
+            "Fetching events for {month:02}-{day:02} ({lang})",
             month = month,
             day = day,
-            lang = args.language
+            lang = args.language,
         ));
         Some(pb)
     };
 
+    // Wikipedia API URL
     let url = format!(
         "https://{lang}.wikipedia.org/api/rest_v1/feed/onthisday/events/{month}/{day}",
-        lang = args.language
+        lang = args.language,
     );
 
-    let resp = client
+    // Fetch & parse JSON
+    let events: OnThisDayResponse = client
         .get(url)
         .send()
         .await
         .context("Network error contacting Wikipedia")?
         .error_for_status()
-        .context("Wikipedia returned an error status")?;
-
-    let events: OnThisDayResponse = resp
+        .context("Wikipedia returned an error status")?
         .json()
         .await
         .context("Invalid JSON returned by Wikipedia")?;
 
-    if let Some(pb) = pb {
+    if let Some(pb) = spinner {
         pb.finish_and_clear();
     }
 
-    println!(
-        "{} {}",
-        "--- On This Day:".bold(),
-        now.format("%B %e,").to_string().trim()
-    );
-    let width = termwidth().max(40); // sensible minimum
-    for event in events.events.iter().rev() {
-        println!(
-            "[{}] {}",
-            event.year.yellow(),
-            fill(&event.text, width)
-        );
+    /* ----------- pretty table ----------- */
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            Cell::new("Year").add_attribute(Attribute::Bold),
+            Cell::new("Event").add_attribute(Attribute::Bold),
+        ]);
+
+    let width = termwidth().max(50); // sensible minimum
+
+    for ev in events.events.iter().rev() {
+        table.add_row(Row::from(vec![
+            Cell::new(ev.year)
+                .fg(Color::Yellow)
+                .add_attribute(Attribute::Bold),
+            Cell::new(fill(&ev.text, width - 15)),
+        ]));
     }
+
+    // Nice human-readable header for the requested day
+    let fake_year = 2024; // leap year → Feb-29 always valid
+    let header_date = NaiveDate::from_ymd_opt(fake_year, month, day).unwrap();
+    println!(
+        "{} {}\n",
+        "— On This Day:".bold().underline(),
+        header_date.format("%B %e").to_string().trim(),
+    );
+    println!("{table}");
 
     Ok(())
 }
 
-// ---------- Time display ----------------------------------------------------
+/* --------------------------------------------------------------------------
+ *                              time output
+ * ---------------------------------------------------------------------- */
 
 fn show_current_time(now: chrono::DateTime<Local>) {
     println!(
         "{}\n{}",
         "The current time is:".bold(),
-        now.format("%A, %B %d, %Y %r")
+        now.format("%A, %B %d, %Y %r"),
     );
 }
 
-// Statistics are separated so they can be unit-tested easily -----------------
+fn ascii_bar(percent: f64, width: usize) -> String {
+    let filled = ((percent / 100.0) * width as f64).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!(
+        "{}{}",
+        "█".repeat(filled).green(),
+        "░".repeat(empty).dimmed(),
+    )
+}
+
+/* --------------------------------------------------------------------------
+ *                            time statistics
+ * ---------------------------------------------------------------------- */
 
 #[derive(Debug, Copy, Clone)]
 #[must_use]
@@ -231,24 +301,41 @@ fn compute_time_statistics(now: chrono::DateTime<Local>) -> TimeStats {
 
 fn show_time_statistics(now: chrono::DateTime<Local>) {
     let stats = compute_time_statistics(now);
+    let bar_width = 28;
 
-    println!("{}\n----------------", "Time Statistics:".bold());
+    println!("\n{}\n{}", "Time statistics".bold(), "─".repeat(35));
+    println!("Date            : {}", now.format("%A, %B %d %Y"));
+    println!("Local time      : {}", now.format("%r"));
+    println!("Unix timestamp  : {}", stats.unix_timestamp);
+
     println!(
-        "Day of the year: {}/{}",
-        stats.day_of_year, stats.total_days_in_year
+        "\nDay   ({}/{}) : {} {:>5.1} %",
+        stats.day_of_year,
+        stats.total_days_in_year,
+        ascii_bar(stats.day_progress, bar_width),
+        stats.day_progress,
     );
-    println!("Week of the year: {}", stats.week_of_year);
+
     println!(
-        "Is it a leap year? {}",
-        if stats.is_leap { "Yes" } else { "No" }
+        "Year  (week {}) : {} {:>5.1} %",
+        stats.week_of_year,
+        ascii_bar(stats.year_progress, bar_width),
+        stats.year_progress,
     );
-    println!("Seconds since Unix epoch: {}", stats.unix_timestamp);
-    println!("\nProgress:");
-    println!("Day is {:.2}% complete", stats.day_progress);
-    println!("Year is {:.2}% complete", stats.year_progress);
+
+    println!(
+        "\nLeap year       : {}",
+        if stats.is_leap {
+            "Yes".bright_green().to_string()
+        } else {
+            "No".bright_red().to_string()
+        },
+    );
 }
 
-// ---------- Tests -----------------------------------------------------------
+/* --------------------------------------------------------------------------
+ *                                 tests
+ * ---------------------------------------------------------------------- */
 
 #[cfg(test)]
 mod tests {
@@ -257,9 +344,7 @@ mod tests {
 
     #[test]
     fn leap_year_statistics() {
-        let dt = Local
-            .with_ymd_and_hms(2024, 3, 1, 0, 0, 0)
-            .unwrap();
+        let dt = Local.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
         let stats = compute_time_statistics(dt);
         assert!(stats.is_leap);
         assert_eq!(stats.total_days_in_year, 366);
@@ -269,9 +354,7 @@ mod tests {
 
     #[test]
     fn non_leap_year() {
-        let dt = Local
-            .with_ymd_and_hms(2025, 3, 1, 0, 0, 0)
-            .unwrap();
+        let dt = Local.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap();
         let stats = compute_time_statistics(dt);
         assert!(!stats.is_leap);
         assert_eq!(stats.total_days_in_year, 365);
@@ -287,5 +370,13 @@ mod tests {
     fn parse_lang_code_err() {
         assert!(parse_lang_code("eng").is_err());
         assert!(parse_lang_code("1a").is_err());
+    }
+
+    #[test]
+    fn custom_date_validation() {
+        // Valid
+        assert!(NaiveDate::from_ymd_opt(2024, 2, 29).is_some());
+        // Invalid
+        assert!(NaiveDate::from_ymd_opt(2024, 4, 31).is_none());
     }
 }

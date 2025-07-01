@@ -13,3 +13,4 @@ indicatif = "0.17"
 anyhow = "1.0.98"
 textwrap = { version = "0.16.2", features = ["terminal_size"] }
 owo-colors = "4.2.2"
+comfy-table = "7.1.4"
