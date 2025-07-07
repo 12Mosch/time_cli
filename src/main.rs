@@ -40,7 +40,7 @@ fn parse_lang_code(s: &str) -> std::result::Result<String, String> {
              Wikipedia “On This Day” events",
     propagate_version = true,
     color = clap::ColorChoice::Always,
-    after_long_help = "Project home: https://github.com/your/repo",
+    after_long_help = "Project home: https://github.com/12Mosch/time_cli",
 )]
 struct Cli {
     #[command(subcommand)]
