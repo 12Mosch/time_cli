@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Local, NaiveDate, Timelike};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{
     presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Row, Table,
 };
@@ -51,6 +51,14 @@ struct Cli {
     statistics: bool,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum EventType {
+    Events,
+    Births,
+    Deaths,
+    Holidays,
+}
+
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Fetch “On This Day” events from Wikipedia
@@ -59,6 +67,16 @@ enum Command {
 
 #[derive(Parser, Debug)]
 struct HistoryArgs {
+    /// Type of events to show
+    #[arg(
+        short = 't',
+        long,
+        value_enum,
+        default_value_t = EventType::Events,
+        value_name = "TYPE",
+    )]
+    r#type: EventType,
+
     /// Wikipedia language code
     #[arg(
         short,
@@ -98,12 +116,24 @@ struct HistoryArgs {
 
 #[derive(Deserialize, Debug)]
 struct OnThisDayResponse {
+    #[serde(default)]
     events: Vec<Event>,
+    #[serde(default)]
+    births: Vec<Event>,
+    #[serde(default)]
+    deaths: Vec<Event>,
+    #[serde(default)]
+    holidays: Vec<Holiday>,
 }
 
 #[derive(Deserialize, Debug)]
 struct Event {
     year: i32,
+    text: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct Holiday {
     text: String,
 }
 
@@ -169,7 +199,8 @@ async fn show_on_this_day(client: &Client, args: &HistoryArgs) -> Result<()> {
             ),
         );
         pb.set_message(format!(
-            "Fetching events for {month:02}-{day:02} ({lang})",
+            "Fetching {event_type:?} for {month:02}-{day:02} ({lang})",
+            event_type = args.r#type,
             month = month,
             day = day,
             lang = args.language,
@@ -178,13 +209,15 @@ async fn show_on_this_day(client: &Client, args: &HistoryArgs) -> Result<()> {
     };
 
     // Wikipedia API URL
+    let event_type_str = format!("{:?}", args.r#type).to_ascii_lowercase();
     let url = format!(
-        "https://{lang}.wikipedia.org/api/rest_v1/feed/onthisday/events/{month}/{day}",
+        "https://{lang}.wikipedia.org/api/rest_v1/feed/onthisday/{event_type}/{month}/{day}",
         lang = args.language,
+        event_type = event_type_str,
     );
 
     // Fetch & parse JSON
-    let events: OnThisDayResponse = client
+    let response: OnThisDayResponse = client
         .get(url)
         .send()
         .await
@@ -203,21 +236,54 @@ async fn show_on_this_day(client: &Client, args: &HistoryArgs) -> Result<()> {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec![
-            Cell::new("Year").add_attribute(Attribute::Bold),
-            Cell::new("Event").add_attribute(Attribute::Bold),
-        ]);
+        .set_content_arrangement(ContentArrangement::Dynamic);
 
     let width = termwidth().max(50); // sensible minimum
 
-    for ev in events.events.iter().rev() {
-        table.add_row(Row::from(vec![
-            Cell::new(ev.year)
-                .fg(Color::Yellow)
-                .add_attribute(Attribute::Bold),
-            Cell::new(fill(&ev.text, width - 15)),
-        ]));
+    match args.r#type {
+        EventType::Holidays => {
+            table.set_header(vec![Cell::new("Holidays & Observances")
+                .add_attribute(Attribute::Bold)]);
+            if response.holidays.is_empty() {
+                table.add_row(vec!["No holidays found for this day."]);
+            } else {
+                for holiday in &response.holidays {
+                    table.add_row(vec![Cell::new(fill(
+                        &holiday.text,
+                        width - 5,
+                    ))]);
+                }
+            }
+        }
+        _ => {
+            let (header1, header2, events) = match args.r#type {
+                EventType::Events => ("Year", "Event", &response.events),
+                EventType::Births => ("Born", "Person", &response.births),
+                EventType::Deaths => ("Died", "Person", &response.deaths),
+                EventType::Holidays => unreachable!(),
+            };
+
+            table.set_header(vec![
+                Cell::new(header1).add_attribute(Attribute::Bold),
+                Cell::new(header2).add_attribute(Attribute::Bold),
+            ]);
+
+            if events.is_empty() {
+                table.add_row(vec![
+                    Cell::new("N/A"),
+                    Cell::new("No entries of this type found for this day."),
+                ]);
+            } else {
+                for ev in events.iter().rev() {
+                    table.add_row(Row::from(vec![
+                        Cell::new(ev.year)
+                            .fg(Color::Yellow)
+                            .add_attribute(Attribute::Bold),
+                        Cell::new(fill(&ev.text, width - 15)),
+                    ]));
+                }
+            }
+        }
     }
 
     // Nice human-readable header for the requested day
