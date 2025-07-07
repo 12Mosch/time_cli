@@ -85,7 +85,7 @@ struct HistoryArgs {
     )]
     month: Option<u32>,
 
-    /// Override day of month (1-31). Defaults to the current day.
+    /// Override day of the month (1-31). Defaults to the current day.
     #[arg(
         short = 'd',
         long,
