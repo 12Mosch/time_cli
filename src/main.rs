@@ -42,7 +42,7 @@ fn parse_lang_code(s: &str) -> std::result::Result<String, String> {
     about = "Tiny CLI that prints the current time and \
              Wikipedia “On This Day” events",
     propagate_version = true,
-    color = clap::ColorChoice::Always,
+    color = clap::ColorChoice::Auto,
     after_long_help = "Project home: https://github.com/12Mosch/time_cli",
 )]
 struct Cli {
@@ -198,8 +198,13 @@ async fn fetch_wikipedia_data(
     month: u32,
     day: u32,
 ) -> Result<OnThisDayResponse> {
+    // Allow overriding the API endpoint for testing purposes
+    let base_url = std::env::var("TEST_WIKIPEDIA_API_URL").unwrap_or_else(
+        |_| format!("https://{lang}.wikipedia.org"),
+    );
+
     let url = format!(
-        "https://{lang}.wikipedia.org/api/rest_v1/feed/onthisday/{event_type}/{month}/{day}",
+        "{base_url}/api/rest_v1/feed/onthisday/{event_type}/{month}/{day}",
     );
 
     CLIENT
