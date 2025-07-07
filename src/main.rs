@@ -40,22 +40,19 @@ fn parse_lang_code(s: &str) -> std::result::Result<String, String> {
              Wikipedia “On This Day” events",
     propagate_version = true,
     color = clap::ColorChoice::Always,
-    arg_required_else_help = true,
     after_long_help = "Project home: https://github.com/your/repo",
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+
+    /// Also show progress through the day / year
+    #[arg(short, long)]
+    statistics: bool,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Display the current time (optionally with statistics)
-    Time {
-        /// Also show progress through the day / year
-        #[arg(short, long)]
-        statistics: bool,
-    },
     /// Fetch “On This Day” events from Wikipedia
     History(HistoryArgs),
 }
@@ -129,15 +126,17 @@ async fn main() -> Result<()> {
         .context("Failed to build HTTP client")?;
 
     match cli.command {
-        Command::Time { statistics } => {
+        Some(Command::History(args)) => {
+            show_on_this_day(&client, &args).await?
+        }
+        None => {
             let now = Local::now();
-            if statistics {
+            if cli.statistics {
                 show_time_statistics(now);
             } else {
                 show_current_time(now);
             }
         }
-        Command::History(args) => show_on_this_day(&client, &args).await?,
     }
 
     Ok(())
