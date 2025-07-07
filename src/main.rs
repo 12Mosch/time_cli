@@ -8,7 +8,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use reqwest::Client;
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use textwrap::{fill, termwidth};
 
 /* --------------------------------------------------------------------------
@@ -157,7 +157,9 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::History(args)) => {
-            show_on_this_day(&client, &args).await?
+            let start = Instant::now();
+            show_on_this_day(&client, &args).await?;
+            println!("\nFinished in {:.2?}.", start.elapsed());
         }
         None => {
             let now = Local::now();
