@@ -1,10 +1,12 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
+use cached::proc_macro::cached;
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{
     presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Row, Table,
 };
 use indicatif::{ProgressBar, ProgressStyle};
+use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
 use reqwest::Client;
 use serde::Deserialize;
@@ -51,7 +53,7 @@ struct Cli {
     statistics: bool,
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum EventType {
     Events,
     Births,
@@ -114,7 +116,7 @@ struct HistoryArgs {
  *                                models
  * ---------------------------------------------------------------------- */
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct OnThisDayResponse {
     #[serde(default)]
     events: Vec<Event>,
@@ -126,16 +128,32 @@ struct OnThisDayResponse {
     holidays: Vec<Holiday>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct Event {
     year: i32,
     text: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct Holiday {
     text: String,
 }
+
+/* --------------------------------------------------------------------------
+ *                                globals
+ * ---------------------------------------------------------------------- */
+
+static CLIENT: Lazy<Client> = Lazy::new(|| {
+    Client::builder()
+        .user_agent(concat!(
+        env!("CARGO_PKG_NAME"),
+        '/',
+        env!("CARGO_PKG_VERSION")
+        ))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client")
+});
 
 /* --------------------------------------------------------------------------
  *                                 main
@@ -145,20 +163,10 @@ struct Holiday {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let client = Client::builder()
-        .user_agent(concat!(
-        env!("CARGO_PKG_NAME"),
-        '/',
-        env!("CARGO_PKG_VERSION")
-        ))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("Failed to build HTTP client")?;
-
     match cli.command {
         Some(Command::History(args)) => {
             let start = Instant::now();
-            show_on_this_day(&client, &args).await?;
+            show_on_this_day(&args).await?;
             println!("\nFinished in {:.2?}.", start.elapsed());
         }
         None => {
@@ -178,7 +186,31 @@ async fn main() -> Result<()> {
  *                              Wikipedia
  * ---------------------------------------------------------------------- */
 
-async fn show_on_this_day(client: &Client, args: &HistoryArgs) -> Result<()> {
+#[cached(
+    time = 86400, // Cache for 24 hours
+    result = true  // Cache both Ok and Err results
+)]
+async fn fetch_wikipedia_data(
+    lang: String,
+    event_type: String,
+    month: u32,
+    day: u32,
+) -> Result<OnThisDayResponse> {
+    let url = format!(
+        "https://{lang}.wikipedia.org/api/rest_v1/feed/onthisday/{event_type}/{month}/{day}",
+    );
+
+    CLIENT
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(Into::into)
+}
+
+async fn show_on_this_day(args: &HistoryArgs) -> Result<()> {
     // Determine the requested calendar day
     let today = Local::now();
     let month = args.month.unwrap_or(today.month());
@@ -210,25 +242,15 @@ async fn show_on_this_day(client: &Client, args: &HistoryArgs) -> Result<()> {
         Some(pb)
     };
 
-    // Wikipedia API URL
-    let event_type_str = format!("{:?}", args.r#type).to_ascii_lowercase();
-    let url = format!(
-        "https://{lang}.wikipedia.org/api/rest_v1/feed/onthisday/{event_type}/{month}/{day}",
-        lang = args.language,
-        event_type = event_type_str,
-    );
-
     // Fetch & parse JSON
-    let response: OnThisDayResponse = client
-        .get(url)
-        .send()
-        .await
-        .context("Network error contacting Wikipedia")?
-        .error_for_status()
-        .context("Wikipedia returned an error status")?
-        .json()
-        .await
-        .context("Invalid JSON returned by Wikipedia")?;
+    let event_type_str = format!("{:?}", args.r#type).to_ascii_lowercase();
+    let response = fetch_wikipedia_data(
+        args.language.clone(),
+        event_type_str,
+        month,
+        day,
+    )
+        .await?;
 
     if let Some(pb) = spinner {
         pb.finish_and_clear();
