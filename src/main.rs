@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use anyhow::{bail, Result};
 use cached::proc_macro::cached;
 use chrono::{Datelike, Local, NaiveDate, Timelike};
@@ -10,7 +12,6 @@ use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
 use reqwest::Client;
 use serde::Deserialize;
-use std::time::{Duration, Instant};
 use textwrap::{fill, termwidth};
 
 /* --------------------------------------------------------------------------
@@ -54,6 +55,7 @@ struct Cli {
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[value(rename_all = "lower")]
 enum EventType {
     Events,
     Births,
@@ -221,6 +223,9 @@ async fn show_on_this_day(args: &HistoryArgs) -> Result<()> {
         bail!("'{month:02}-{day:02}' is not a valid calendar date");
     }
 
+    let event_type_name =
+        args.r#type.to_possible_value().unwrap().get_name().to_string();
+
     // Optional spinner
     let spinner = if args.quiet {
         None
@@ -233,20 +238,17 @@ async fn show_on_this_day(args: &HistoryArgs) -> Result<()> {
             ),
         );
         pb.set_message(format!(
-            "Fetching {event_type:?} for {month:02}-{day:02} ({lang})",
-            event_type = args.r#type,
-            month = month,
-            day = day,
-            lang = args.language,
+            "Fetching {event_type} for {month:02}-{day:02} ({lang})",
+            event_type = &event_type_name,
+            lang = &args.language,
         ));
         Some(pb)
     };
 
     // Fetch & parse JSON
-    let event_type_str = format!("{:?}", args.r#type).to_ascii_lowercase();
     let response = fetch_wikipedia_data(
         args.language.clone(),
-        event_type_str,
+        event_type_name,
         month,
         day,
     )
@@ -363,8 +365,7 @@ struct TimeStats {
 
 fn compute_time_statistics(now: chrono::DateTime<Local>) -> TimeStats {
     let year = now.year();
-    let is_leap =
-        NaiveDate::from_ymd_opt(year, 12, 31).unwrap().ordinal() == 366;
+    let is_leap = NaiveDate::from_ymd_opt(year, 2, 29).is_some();
 
     let seconds_into_day =
         now.hour() * 3600 + now.minute() * 60 + now.second();
